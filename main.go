@@ -1,70 +1,44 @@
-// relay.go
+// server.go
 package main
 
 import (
 	"fmt"
-	"log"
-	"os"
-	"os/signal"
-	"syscall"
-
-	"github.com/libp2p/go-libp2p"
-	"github.com/libp2p/go-libp2p/core/host"
-	"github.com/libp2p/go-libp2p/core/network"
-	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
+	"net"
 )
 
-const identifyProtocol = "/ipfs/id/1.0.0"
-const publicIPProtocol = "/publicIPProtocol/1.0.0"
-
-type RelayNode struct {
-	host host.Host
-}
+var clients = make(map[string]*net.UDPAddr)
 
 func main() {
-	// Создаем relay хост
-	h, err := libp2p.New(
-		libp2p.ListenAddrStrings(
-			"/ip4/0.0.0.0/tcp/4001",
-			"/ip4/0.0.0.0/udp/4001/quic-v1",
-		),
-		libp2p.EnableRelayService(),
-	)
-	if err != nil {
-		log.Fatal(err)
+	addr, _ := net.ResolveUDPAddr("udp", ":9999")
+	conn, _ := net.ListenUDP("udp", addr)
+	defer conn.Close()
+
+	fmt.Println("Server started on :9999")
+
+	buf := make([]byte, 1024)
+
+	for {
+		n, clientAddr, _ := conn.ReadFromUDP(buf)
+		id := string(buf[:n])
+
+		fmt.Println("Client connected:", id, clientAddr.String())
+		clients[id] = clientAddr
+
+		// Если есть оба клиента — отправляем им адреса друг друга
+		if len(clients) >= 2 {
+			var a, b *net.UDPAddr
+			for _, v := range clients {
+				if a == nil {
+					a = v
+				} else {
+					b = v
+				}
+			}
+
+			conn.WriteToUDP([]byte(b.String()), a)
+			conn.WriteToUDP([]byte(a.String()), b)
+
+			fmt.Println("Exchanged addresses")
+		}
 	}
-	defer h.Close()
-
-	// Включаем relay сервис
-	_, err = relay.New(h)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Printf("=== RELAY NODE ===")
-	log.Printf("ID: %s", h.ID())
-	log.Printf("Addresses:")
-	for _, addr := range h.Addrs() {
-		log.Printf("  %s/p2p/%s", addr, h.ID())
-	}
-	log.Println("=================")
-
-	// Добавить в relay.go
-	h.SetStreamHandler(publicIPProtocol, func(stream network.Stream) {
-		defer stream.Close()
-
-		// Получаем удаленный адрес (это и есть публичный адрес клиента)
-		remoteAddr := stream.Conn().RemoteMultiaddr()
-		publicAddr := fmt.Sprintf("%s/p2p/%s", remoteAddr, stream.Conn().RemotePeer())
-
-		// Отправляем клиенту его публичный адрес
-		stream.Write([]byte(publicAddr))
-
-		log.Printf("Gave public address to %s: %s", stream.Conn().RemotePeer(), publicAddr)
-	})
-
-	// Ждем сигнала
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	<-sigChan
 }
